@@ -15,17 +15,12 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-const RELAY_DIR   = path.join(os.homedir(), ".switchboard");
+const RELAY_DIR   = process.env.SWITCHBOARD_DATA_DIR ?? path.join(os.homedir(), ".switchboard");
 const MSG_FILE    = path.join(RELAY_DIR, "messages.json");
 const LOCK_FILE   = path.join(RELAY_DIR, "messages.lock");
 const NAMED_LOCKS = path.join(RELAY_DIR, "locks.json");
 
 if (!fs.existsSync(RELAY_DIR)) fs.mkdirSync(RELAY_DIR, { recursive: true });
-
-// ── monthly history rotation ──────────────────────────────────────────────────
-// Active file: history.jsonl
-// Archived:    history-YYYY-MM.jsonl
-// On first write of a new month, current file is renamed to the archive name.
 
 function currentMonthTag() {
   const now = new Date();
@@ -45,14 +40,12 @@ function rotateHistoryIfNeeded() {
     const firstLine = fs.readFileSync(active, "utf8").split("\n").find(Boolean);
     if (!firstLine) return;
     const entry = JSON.parse(firstLine);
-    const fileMonth = entry.timestamp?.slice(0, 7); // "YYYY-MM"
+    const fileMonth = entry.timestamp?.slice(0, 7);
     if (fileMonth && fileMonth !== currentMonthTag()) {
       fs.renameSync(active, path.join(RELAY_DIR, `history-${fileMonth}.jsonl`));
     }
   } catch {}
 }
-
-// ── file helpers ──────────────────────────────────────────────────────────────
 
 function waitForLock(timeout = 2000) {
   const start = Date.now();
@@ -119,11 +112,8 @@ function formatMessages(messages) {
   }).join("\n\n─────────────────\n\n");
 }
 
-// ── MCP server ────────────────────────────────────────────────────────────────
-
 const server = new McpServer({ name: "claude-relay", version: "2.0.0" });
 
-// send_message ─────────────────────────────────────────────────────────────────
 server.tool(
   "send_message",
   "Send a message to another agent by name.",
@@ -146,7 +136,6 @@ server.tool(
   }
 );
 
-// broadcast ────────────────────────────────────────────────────────────────────
 server.tool(
   "broadcast",
   "Send a message to all known agents except yourself. Agents are discovered from the relay inbox — they need to have called read_messages at least once to be registered.",
@@ -167,7 +156,6 @@ server.tool(
       }
       writeMessages(data);
     });
-
     if (recipients.length === 0) {
       return { content: [{ type: "text", text: "No other agents registered yet. They need to call read_messages once to appear in the relay." }] };
     }
@@ -175,7 +163,6 @@ server.tool(
   }
 );
 
-// read_messages ────────────────────────────────────────────────────────────────
 server.tool(
   "read_messages",
   "Read pending messages in your inbox. Calling this also registers you as a known agent for broadcasts.",
@@ -188,7 +175,7 @@ server.tool(
     let messages;
     withLock(() => {
       const data = readMessages();
-      if (!data[agent_id]) data[agent_id] = []; // register agent
+      if (!data[agent_id]) data[agent_id] = [];
       let inbox = data[agent_id];
       if (thread) inbox = inbox.filter(m => m.thread === thread);
       messages = inbox;
@@ -199,7 +186,6 @@ server.tool(
         writeMessages(data);
       }
     });
-
     if (!messages || messages.length === 0) {
       return { content: [{ type: "text", text: `No pending messages for "${agent_id}".` }] };
     }
@@ -207,7 +193,6 @@ server.tool(
   }
 );
 
-// wait_for_message ─────────────────────────────────────────────────────────────
 server.tool(
   "wait_for_message",
   "Block until a message arrives. Use when you need a reply before continuing.",
@@ -234,7 +219,6 @@ server.tool(
   }
 );
 
-// relay_status ─────────────────────────────────────────────────────────────────
 server.tool(
   "relay_status",
   "See pending message counts and active named locks.",
@@ -243,7 +227,6 @@ server.tool(
     const msgs  = readMessages();
     const locks = readNamedLocks();
     const lines = [];
-
     lines.push("── messages ──");
     if (Object.keys(msgs).length === 0) {
       lines.push("  (no agents registered)");
@@ -252,7 +235,6 @@ server.tool(
         lines.push(`  ${agent}: ${inbox.length} pending`);
       }
     }
-
     lines.push("\n── named locks ──");
     const active = Object.entries(locks).filter(([, v]) => v.held);
     if (active.length === 0) {
@@ -263,12 +245,10 @@ server.tool(
         lines.push(`  🔒 ${resource} — ${info.holder} (${age}s / ${info.ttl_seconds}s TTL)`);
       }
     }
-
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );
 
-// clear_relay ──────────────────────────────────────────────────────────────────
 server.tool(
   "clear_relay",
   "Wipe messages from the relay.",
@@ -286,7 +266,6 @@ server.tool(
   }
 );
 
-// acquire_lock ─────────────────────────────────────────────────────────────────
 server.tool(
   "acquire_lock",
   "Claim exclusive access to a named resource (table, file, migration, etc). Always acquire before touching shared resources and release when done.",
@@ -300,32 +279,25 @@ server.tool(
     withLock(() => {
       const locks = readNamedLocks();
       const existing = locks[resource];
-
       if (existing?.held) {
         const age = (Date.now() - new Date(existing.acquired_at).getTime()) / 1000;
         if (age < existing.ttl_seconds) {
           result = { success: false, holder: existing.holder, age: Math.round(age), ttl: existing.ttl_seconds };
           return;
         }
-        // Expired lock — auto-release and allow acquisition
       }
-
       locks[resource] = { held: true, holder, acquired_at: new Date().toISOString(), ttl_seconds };
       writeNamedLocks(locks);
       appendHistory({ type: "lock_acquired", resource, holder, timestamp: new Date().toISOString() });
       result = { success: true };
     });
-
     if (!result.success) {
-      return {
-        content: [{ type: "text", text: `✗ "${resource}" is locked by ${result.holder} (held for ${result.age}s of ${result.ttl}s TTL). Try again later or check list_locks.` }],
-      };
+      return { content: [{ type: "text", text: `✗ "${resource}" is locked by ${result.holder} (held for ${result.age}s of ${result.ttl}s TTL). Try again later or check list_locks.` }] };
     }
     return { content: [{ type: "text", text: `✓ Lock acquired on "${resource}". Call release_lock when done.` }] };
   }
 );
 
-// release_lock ─────────────────────────────────────────────────────────────────
 server.tool(
   "release_lock",
   "Release a named lock so other agents can access the resource.",
@@ -345,7 +317,6 @@ server.tool(
       appendHistory({ type: "lock_released", resource, holder, timestamp: new Date().toISOString() });
       result = { ok: true };
     });
-
     if (!result.ok) {
       return { content: [{ type: "text", text: `✗ Could not release "${resource}": ${result.reason}` }] };
     }
@@ -353,7 +324,6 @@ server.tool(
   }
 );
 
-// list_locks ───────────────────────────────────────────────────────────────────
 server.tool(
   "list_locks",
   "See all named locks and whether they are currently held or free.",
@@ -374,48 +344,37 @@ server.tool(
   }
 );
 
-// read_history ─────────────────────────────────────────────────────────────────
 server.tool(
   "read_history",
   "Read the history log. Defaults to the current month. Use month param to read an archived month.",
   {
-    limit:  z.number().optional().describe("Most recent N entries to return (default: 50)"),
-    filter: z.string().optional().describe("Filter by agent name or resource name"),
-    type:   z.enum(["message", "broadcast", "lock_acquired", "lock_released"]).optional().describe("Filter by event type"),
-    month:  z.string().optional().describe("Read an archived month, e.g. '2026-03'. Omit for current month."),
+    limit:       z.number().optional().describe("Most recent N entries to return (default: 50)"),
+    filter:      z.string().optional().describe("Filter by agent name or resource name"),
+    type:        z.enum(["message", "broadcast", "lock_acquired", "lock_released"]).optional().describe("Filter by event type"),
+    month:       z.string().optional().describe("Read an archived month, e.g. '2026-03'. Omit for current month."),
     list_months: z.boolean().optional().describe("If true, list all available history files and return."),
   },
   async ({ limit = 50, filter, type, month, list_months }) => {
     try {
-      // List available months
       if (list_months) {
         const files = fs.readdirSync(RELAY_DIR)
           .filter(f => f.startsWith("history") && f.endsWith(".jsonl"))
           .sort();
         return { content: [{ type: "text", text: files.length ? files.join("\n") : "No history files yet." }] };
       }
-
-      // Determine which file to read
-      const file = month
-        ? path.join(RELAY_DIR, `history-${month}.jsonl`)
-        : activeHistoryFile();
-
+      const file = month ? path.join(RELAY_DIR, `history-${month}.jsonl`) : activeHistoryFile();
       if (!fs.existsSync(file)) {
         return { content: [{ type: "text", text: month ? `No history file for ${month}.` : "No history yet." }] };
       }
-
       let entries = fs.readFileSync(file, "utf8")
         .split("\n").filter(Boolean)
         .map(l => { try { return JSON.parse(l); } catch { return null; } })
         .filter(Boolean);
-
       if (type)   entries = entries.filter(e => e.type === type);
       if (filter) entries = entries.filter(e =>
         e.from === filter || e.to === filter || e.holder === filter || e.resource === filter
       );
-
       const recent = entries.slice(-limit);
-
       const formatted = recent.map(e => {
         if (e.type === "message" || e.type === "broadcast") {
           const thread = e.thread ? ` [${e.thread}]` : "";
@@ -425,16 +384,12 @@ server.tool(
         if (e.type === "lock_released") return `[${e.timestamp}] UNLOCK ${e.holder} released "${e.resource}"`;
         return JSON.stringify(e);
       }).join("\n");
-
-      const label = month ?? currentMonthTag();
-      return { content: [{ type: "text", text: `${recent.length} entries (${label}):\n\n${formatted}` }] };
+      return { content: [{ type: "text", text: `${recent.length} entries (${month ?? currentMonthTag()}):\n\n${formatted}` }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error reading history: ${e.message}` }] };
     }
   }
 );
-
-// ── connect ───────────────────────────────────────────────────────────────────
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
