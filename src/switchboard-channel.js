@@ -5,7 +5,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 
-const RELAY_DIR      = path.join(os.homedir(), '.switchboard')
+const RELAY_DIR      = process.env.SWITCHBOARD_DATA_DIR ?? path.join(os.homedir(), '.switchboard')
 const MSG_FILE       = path.join(RELAY_DIR, 'messages.json')
 const SESSIONS_FILE  = path.join(RELAY_DIR, 'sessions.json')
 const LOCK_FILE      = path.join(RELAY_DIR, 'messages.lock')
@@ -157,7 +157,6 @@ if (!agentId) {
   )
   await mcp.connect(new StdioServerTransport())
 } else {
-  // Step a: check session registry
   withLock(() => {
     const sessions = readSessions()
     if (sessions[agentId]) {
@@ -168,10 +167,8 @@ if (!agentId) {
         )
         process.exit(1)
       }
-      // stale claim — fall through to overwrite
     }
 
-    // Step b: write our claim
     sessions[agentId] = {
       pid:       process.pid,
       startedAt: new Date().toISOString(),
@@ -180,10 +177,8 @@ if (!agentId) {
     writeSessions(sessions)
   })
 
-  // Step c: flush stale inbox
   flushStaleMessages(agentId)
 
-  // Step d: create MCP server
   const mcp = new Server(
     { name: 'switchboard-channel', version: '1.0.0' },
     {
@@ -201,11 +196,9 @@ if (!agentId) {
     }
   )
 
-  // Step e: connect to transport
   await mcp.connect(new StdioServerTransport())
 
-  // Step f: set up file watchers
-  let lastKnownCount = 0  // inbox was just flushed
+  let lastKnownCount = 0
 
   function getMessageCount() {
     try {
@@ -245,7 +238,6 @@ if (!agentId) {
         }
       })
     } else {
-      // Messages were cleared (read) — reset counter
       lastKnownCount = count
     }
   }
@@ -270,6 +262,5 @@ if (!agentId) {
     })
   }
 
-  // Step g: register clean exit handlers
   registerCleanExit(agentId)
 }
